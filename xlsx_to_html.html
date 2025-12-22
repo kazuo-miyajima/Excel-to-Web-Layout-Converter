@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Excel→HTML変換</title>
+    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+
+<!--const firstSheetName = workbook.SheetNames[0];
+const worksheet = workbook.Sheets[firstSheetName];
+const htmlString = XLSX.utils.sheet_to_html(worksheet);
+これでいきなりHTML変換できる。セル結合など調査する必要なし！バージョン注意 18では動かない-->
+
+<!-- マウス・タッチ・ドラッグ・スクロール・リサイズなどはリアクティブでないほうがよい
+ つまり普通のイベント処理がおすすめ -->
+
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🔨</text></svg>">
+</head>
+
+<body>
+
+    <div id="drop-area">ここにExcelファイル（.xlsx）をドラッグ＆ドロップ</div>
+    <div id="output"></div>
+    <button id="toggle-source" style="margin-top: 10px;">▼ ソースコードを表示</button>
+    <div id="source-area" style="display:none;">
+        <pre id="source"
+            style="background:#f8f8f8; border:1px solid #ccc; padding:8px; margin-top:10px; overflow:auto;"></pre>
+    </div>
+    <button id="copy-btn" style="margin-top:5px;">ソースコードをコピー</button>
+
+    <script>
+        // TODO: ⚠データがファイル名だけの時は、ディレクトリを先頭に付けると全部つく
+        const file_dir = "./files/support/common/"; 
+        
+        /* ================================
+           DOM取得
+        ================================ */
+        const dropArea = document.getElementById('drop-area');
+        const output = document.getElementById('output');
+        const source = document.getElementById('source');
+        const copyBtn = document.getElementById('copy-btn');
+        const toggleBtn = document.getElementById('toggle-source');
+        const sourceArea = document.getElementById('source-area');
+        initEvents();
+
+        //以降すべて元コードを関数化して移動しただけ
+        //DOM変数.addEventListener('イベント名', 関数名);
+        /* ================================
+           イベント登録
+        ================================ */
+        function initEvents() {
+            toggleBtn.addEventListener('click', toggleSource); // ソースコード表示/非表示ボタン
+
+            //ドロップエリアは各種ドラッグ＆ドロップイベントを登録
+            dropArea.addEventListener('dragover', onDragOver); // ドラッグオーバー
+            dropArea.addEventListener('dragleave', onDragLeave); // ドラッグリーブ
+            dropArea.addEventListener('drop', handleFileDrop); // ドロップ
+
+            copyBtn.addEventListener('click', copySource); // ソースコードコピーボタン
+        }
+
+        // ソースコード表示/非表示切替
+        function toggleSource() {
+            if (sourceArea.style.display === "none") {
+                sourceArea.style.display = "";
+                toggleBtn.textContent = "▲ ソースコードを隠す";
+            } else {
+                sourceArea.style.display = "none";
+                toggleBtn.textContent = "▼ ソースコードを表示";
+            }
+        }
+
+        // ドラッグオーバー処理
+        function onDragOver(e) {
+            e.preventDefault(); // デフォルト動作無効化
+            dropArea.style.background = "#eef";
+        }
+
+        function onDragLeave(e) {
+            e.preventDefault();
+            dropArea.style.background = "";
+        }
+
+        /* ================================
+           ドラッグアンドドロップでのファイル受け取り
+           （１つのみ。２つ目以降は無視される）。
+           読み込み処理はhandleFileLoadedへ委譲
+        ================================ */
+        function handleFileDrop(e) {
+            e.preventDefault();
+            dropArea.style.background = "";
+
+            const file = e.dataTransfer.files[0]; //ドロップされたファイル一覧から「最初の1個」を取り出す
+            if (!file) return; //ファイルが無ければ、ここで関数終了。何も返さない
+
+            const reader = new FileReader(); //ファイルを読み込むための FileReader を作る
+
+            // 読み込み完了後、ここが呼ばれる
+            // evt.target.result にファイルの中身が入っている
+            reader.onload = function (evt) {
+                handleFileLoaded(evt);
+            };
+
+            // ファイル読み込み開始（非同期）
+            reader.readAsArrayBuffer(file);
+        }
+
+        /* ================================
+           Excel読み込み後
+        ================================ */
+        function handleFileLoaded(evt) {
+            const data = new Uint8Array(evt.target.result); // ファイル内容をUint8Array（型付き配列で、 8ビット符号なし整数値の配列）として取得
+            const workbook = XLSX.read(data, { type: 'array' }); //XLSX ライブラリで Excel ファイルとして解析。type: 'array' → Uint8Array を渡す指定
+            const sheet = workbook.Sheets[workbook.SheetNames[0]];
+
+            // シートを「行 × 列の配列」に変換
+            // header: 1 → 1行目をヘッダ扱いせず、純粋な配列にする
+            // blankrows: false → 空行は除外
+            const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, blankrows: false });//rowsには２次元配列が入る
+
+            // 見出し文字列 → CSSクラス名 の対応表
+            //  HTML生成時に使うための定義
+            const headerClassMap = {
+                "生徒用": "student",
+                "教師用": "teacher",
+                "管理用": "admin",
+            };
+
+            const fileCols = detectFileCols(rows); //ヘッダ行を調査して、ファイル列を特定
+            const spanMap = buildSpanMap(sheet, rows);
+            const html = buildHTML(rows, spanMap, fileCols, headerClassMap);
+
+            output.innerHTML = html;  //生成した HTML を画面に表示
+            source.textContent = html;// 生成した HTML をソースコードエリアにセット
+        }
+
+        /* ================================
+           ヘッダ行の調査
+        ================================ */
+        function detectFileCols(rows) { 
+            const fileCols = {};
+            const header = rows[0] || []; //rows[0] が 存在すればheaderに代入undefined（行が1つもない）なら []
+            for (let c = 0; c < header.length; c++) {
+                const val = String(header[c] || "").toLowerCase();
+                if (val.includes("word")) fileCols[c] = "doc";
+                else if (val.includes("pdf")) fileCols[c] = "pdf";
+                else if (val.includes("excel") || val.includes("xlsx")) fileCols[c] = "xlsx";
+                else if (val.includes("text")) fileCols[c] = "txt";
+            }
+            return fileCols; // { 列番号: ファイル種別 } のjsonで返す
+        }
+
+        function buildSpanMap(sheet, rows) {
+            const merges = sheet["!merges"] || []; //シート内の結合セル情報を取得(json配列)
+            const spanMap = {};
+
+            for (const merge of merges) {
+                const r0 = merge.s.r, c0 = merge.s.c;
+                const r1 = merge.e.r, c1 = merge.e.c;
+
+                spanMap[`${r0},${c0}`] = {
+                    rowspan: r1 - r0 + 1,
+                    colspan: c1 - c0 + 1
+                };
+
+                for (let r = r0; r <= r1; r++) {
+                    if (!rows[r]) rows[r] = [];
+                    for (let c = c0; c <= c1; c++) {
+                        if (r === r0 && c === c0) continue;
+                        rows[r][c] = null;
+                    }
+                }
+            }
+            return spanMap;
+        }
+
+        function buildHTML(rows, spanMap, fileCols, headerClassMap) {
+            let html = '<table class="thinTable webSupportTable">\n'; // 既存クラス（css）を維持
+
+            for (let r = 0; r < rows.length; r++) {
+                let downloadAllCol = -1;
+                for (let c = 0; c < (rows[r]?.length || 0); c++) {
+                    if (String(rows[r][c]).trim() === "一括ダウンロード") {
+                        downloadAllCol = c;
+                        break;
+                    }
+                }
+
+                html += '  <tr>\n';
+
+                for (let c = 0; c < (rows[r]?.length || 0); c++) {
+                    const cell = rows[r][c];
+                    if (cell === null) continue;
+
+                    let attrs = "";
+                    const span = spanMap[`${r},${c}`];
+                    if (span) {
+                        if (span.rowspan > 1) attrs += ` rowspan=\"${span.rowspan}\"`;
+                        if (span.colspan > 1) attrs += ` colspan=\"${span.colspan}\"`;
+                    }
+
+                    let content = cell !== undefined ? cell : "";
+                    let tdClass = "";
+
+                    if (r === 0 && typeof content === "string") {
+                        for (const [key, className] of Object.entries(headerClassMap)) {
+                            if (content.includes(key)) {
+                                tdClass = ` class=\"${className}\"`;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (downloadAllCol >= 0 && c >= downloadAllCol) {
+                        tdClass = tdClass
+                            ? tdClass.replace('"', ' download-all"')
+                            : ' class="download-all"';
+                    }
+
+                    const cellTag = (r === 0) ? "th" : "td";
+
+                    if (r > 0 && fileCols[c] && cell) {
+                        const icon = `/files/support/common/icon/${fileCols[c]}.png`;
+                        content = `<a href=\"${file_dir}${cell}\"><img src=\"${icon}\" alt=\"${fileCols[c]}\" width=\"30\" height=\"30\" style=\"display:block;margin:auto;\" /></a>`;
+                    }
+
+                    html += `    <${cellTag}${tdClass}${attrs}>${content}</${cellTag}>\n`;
+                }
+                html += '  </tr>\n';
+            }
+            html += '</table>\n';
+            html += '\n<style>\n    .webSupportTable {\n        width: 100%;\n        border-collapse: collapse;\n        font-family: "Shin Go Regular", "Yu Gothic", 游ゴシック, "Hiragino Kaku Gothic ProN", "Hiragino Kaku Gothic Pro", "ヒラギノ角ゴ Pro W3", メイリオ, Meiryo, sans-serif;\n    }\n    .webSupportTable tr{\n        height: 32px;\n    }\n    .webSupportTable td{\n        font-size: 18px;\n    }\n    .webSupportTable th{\n        background-color: white;\n        text-align: center;\n        font-size: 16px;\n    }\n    .download-all{\n        background-color: beige\n    }\n    .webSupportTable th.student{\n        background-color: #ced4d9;\n\n    }\n    .webSupportTable th.teacher{\n        background-color: #f8cac6;\n    }\n    .horizontal-padding-zero{\n        padding-left: 0 !important;\n        padding-right: 0 !important;\n    }\n    .file-format{\n        font-size: 14px;\n    }\n    .diagonal_line_l {\n      background-image: linear-gradient(to right top, transparent calc(50% - 0.4px), rgba(128, 128, 128, 0.5) 50%, rgba(128, 128, 128, 0.5) calc(50% + 0.4px), transparent calc(50% + 0.8px)); \n    }\n    .diagonal_line_r {\n      background-image: linear-gradient(to left top, transparent calc(50% - 0.4px), rgba(128, 128, 128, 0.5) 50%, rgba(128, 128, 128, 0.5) calc(50% + 0.4px), transparent calc(50% + 0.8px)); \n    }\n</style>';
+            return html;
+        }
+
+        function copySource() {
+            navigator.clipboard.writeText(source.textContent);
+            copyBtn.textContent = "ソースコードをコピーしました！";
+            setTimeout(() => { copyBtn.textContent = "ソースコードをコピー"; }, 1200);
+        }
+    </script>
+
+    <style>
+        #drop-area {
+            border: 2px dashed #888;
+            padding: 40px;
+            text-align: center;
+            color: #888;
+            margin-bottom: 20px;
+        }
+
+        table {
+            border-collapse: collapse;
+        }
+
+        td,
+        th {
+            border: 1px solid #ccc;
+            padding: 4px 8px;
+        }
+    </style>
+</body>
+
+</html>
