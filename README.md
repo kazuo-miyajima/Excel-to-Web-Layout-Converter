@@ -1,5 +1,3 @@
-了解です。英語版を用意しました（そのまま `README.md` に使える形です）。
-
 ---
 
 # Excel to Web Layout Converter
